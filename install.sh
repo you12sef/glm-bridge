@@ -111,7 +111,8 @@ done
 HOSTPORT="${URL#tcp://}"
 HOST="${HOSTPORT%%:*}"
 PORT="${HOSTPORT##*:}"
-CONN="ssh -p \"$PORT\" $USER@$HOST"
+CUR_USER="$(id -un 2>/dev/null || printf '%s' "${USER:-unknown}")"
+CONN="ssh -p \"$PORT\" $CUR_USER@$HOST"
 
 # save for later reference on the server
 cat > "$GLM_DIR/CONNECT.txt" <<EOF
