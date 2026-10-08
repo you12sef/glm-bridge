@@ -89,7 +89,7 @@ def main():
     ap.add_argument("--list", action="store_true", help="list live servers")
     ap.add_argument("--connect", metavar="SERVER", help="connect to named server")
     ap.add_argument("--cmd", default="hostname && whoami && date", help="command to run")
-    ap.add_argument("--user", default="admin")
+    ap.add_argument("--user", default="", help="SSH username — use the one the user sends in chat")
     ap.add_argument("--password", default="")
     ap.add_argument("--install-user")
     ap.add_argument("--install-pass")
@@ -115,6 +115,8 @@ def main():
             return
 
     if args.connect:
+        if not args.user:
+            ap.error("--connect requires --user (each server has its own username)")
         if args.connect not in servers:
             print(f"[!] Server '{args.connect}' not in live list: {list(servers)}")
             sys.exit(3)
