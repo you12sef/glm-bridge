@@ -25,7 +25,9 @@
 ## 2. USER-FILLED BLOCK / يملؤه المستخدم في الشات
 
 ```text
-NTFY TOPIC   : glmb-fleet-64aaf6b02cad
+NTFY TOPIC   : <the USER pastes it in the CHAT — install.sh generates
+               a FRESH topic id on EVERY install; always use the latest
+               topic the user sent. Format example: glmb-fleet-64aaf6b02cad>
 SERVER NAME  : <paste — or read it from the RENEW/HEARTBEAT messages>
 SSH USER     : <paste>
 SSH PASSWORD : <paste — chat only, NEVER save into any file>
@@ -33,6 +35,11 @@ FIRST CONNECTION COMMAND (printed by install.sh — use ONLY for first contact
 or if the ntfy topic is unreachable):
   ssh -p "<PORT>" <USER>@<LINK>
 ```
+
+> **TOPIC LIFETIME / مهم:** every `install.sh` run generates a NEW ntfy
+> topic. The user sends the CURRENT topic id in the CHAT together with the
+> rest of the info. If discovery on the topic you have returns empty, do
+> NOT conclude the server is down — first ask in chat if the topic changed.
 
 ## 3. Golden rule / القاعدة الذهبية
 
@@ -45,7 +52,7 @@ first contact or for repairing the server when ntfy discovery fails.
 Run in your sandbox (plain bash, no dependencies):
 
 ```bash
-curl -s "https://ntfy.sh/glmb-fleet-64aaf6b02cad/json?poll=1&since=all" \
+curl -s "https://ntfy.sh/<TOPIC-FROM-CHAT>/json?poll=1&since=all" \
   | python3 -c "
 import sys, json
 best, ts = '', 0
@@ -69,7 +76,7 @@ Fall back to the FIRST CONNECTION COMMAND (§2), fix the server (§7), done.
 # pip install paramiko   (sandbox may reset env between messages — reinstall freely)
 import json, urllib.request, paramiko
 
-TOPIC   = "glmb-fleet-64aaf6b02cad"
+TOPIC   = "<TOPIC-FROM-CHAT>"     # user pastes the current topic in the CHAT
 SSHUSER = "<paste>"     # from §2
 SSHPASS = "<paste>"     # from §2
 
@@ -113,7 +120,7 @@ For file transfers use `sftp = c.open_sftp()` → `sftp.put(local, remote)` / `s
 | Problem | Fix |
 |---------|-----|
 | SSH died mid-work | It's the 50-min renewal. Re-run §4 → §5. Do NOT re-setup. |
-| Topic has no messages | Watchdog down. Connect via §2 fallback command, then re-run: `setsid nohup bash <repo>/install.sh <USER/REPO> <SERVER NAME> &` — or push the kit files from the repo via SFTP and run install.sh. |
+| Topic has no messages | Watchdog down. Connect via §2 fallback command, then re-run: `setsid nohup bash <repo>/install.sh <USER/REPO> <SERVER NAME> &` — or push the kit files from the repo via SFTP and run install.sh. **Re-running install.sh generates a NEW topic — the user must send it in chat.** |
 | Server rebooted | `@reboot` crontab auto-restarts the watchdog. Wait ≤2 min then §4. |
 | Need file from the repo on the server | `curl -fsSL https://raw.githubusercontent.com/<USER>/<REPO>/main/<file> -o /tmp/<file>` |
 
@@ -131,7 +138,7 @@ Server-side state (diagnose via SSH): `~/.glm-bridge/` →
 
 - Built 2026-10-08. ZeroTier was impossible in the AI sandbox (no root/TUN) → replaced
   by this bridge. Full protocol details: `README.md` in the user's GitHub repo.
-- Kit files: `install.sh` (server one-command installer), `glm-watchdog.sh` (daemon),
+- Kit files: `install.sh` (server one-command installer — generates a FRESH ntfy topic per install), `glm-watchdog.sh` (daemon),
   `glm-bootstrap.sh` (AI-driven remote installer), `discover.py` (optional AI tool),
   `AI-HANDOFF.md` (this file), `README.md`.
 
@@ -186,7 +193,7 @@ body; truncate long command output to the first/last few lines.
 
 ```python
 import json, os, sys, time, urllib.request
-TOPIC = "glmb-fleet-XXXXXXXXXXXX"
+TOPIC = "glmb-fleet-XXXXXXXXXXXX"   # current topic: user sends it in the CHAT (fresh per install)
 STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ntfy_since")
 def load():
     try: st = json.load(open(STATE)); return int(st["since"]), set(st["seen"])
