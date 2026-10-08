@@ -2,8 +2,9 @@
 # =====================================================================
 # install.sh — glm-bridge one-command installer
 #
-# Downloads the project from GitHub onto THIS server, installs & starts
-# the tunnel watchdog, then prints the SSH connection command.
+# Downloads the project from GitHub onto THIS server, generates a FRESH
+# ntfy topic id (new on EVERY install), installs & starts the tunnel
+# watchdog, then prints the SSH connection command + the topic id.
 #
 # Usage (on the server):
 #   bash install.sh <USER/REPO> [server-name]
@@ -12,12 +13,24 @@
 #   bash install.sh myuser/glm-bridge pronet-movies
 #
 # Requirements: bash, ssh, curl (or wget), sed. No root needed.
-# Idempotent: safe to re-run at any time (repairs/replaces the watchdog).
+# Re-run safe (repairs/replaces the watchdog) — NOTE: every run generates a NEW ntfy topic id.
 # =====================================================================
 set -u
 
 # ---- EMBEDDED CONFIG (edit here only if you know why) ---------------
-NTFY_TOPIC="glmb-fleet-64aaf6b02cad"     # ntfy.sh registry topic (public by design)
+# ntfy.sh registry topic — GENERATED FRESH on every install (public by design).
+# New install => new topic id; the user pastes it into AI-HANDOFF.md (§2)
+# and tells the AI in the chat. Override: export NTFY_TOPIC (rarely needed).
+gen_topic() {
+    if command -v openssl >/dev/null 2>&1; then
+        printf 'glmb-fleet-%s' "$(openssl rand -hex 6)"
+    elif [ -r /dev/urandom ]; then
+        printf 'glmb-fleet-%s' "$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+    else
+        printf 'glmb-fleet-%s%x' "$(date +%s)" "$RANDOM"
+    fi
+}
+NTFY_TOPIC="${NTFY_TOPIC:-$(gen_topic)}"
 RENEW_NOTE="watchdog renews the tunnel every 50 min; current URL always on ntfy"
 # ---------------------------------------------------------------------
 
@@ -78,7 +91,7 @@ fetch_file() {
 normalize_repo
 log "repo raw base : $RAW"
 log "server name   : $SERVER_NAME"
-log "ntfy topic    : $NTFY_TOPIC"
+log "ntfy topic    : $NTFY_TOPIC (generated fresh for this install)"
 
 mkdir -p "$GLM_DIR"
 fetch_file "glm-watchdog.sh" "$GLM_DIR/glm-watchdog.template.sh"
@@ -144,7 +157,9 @@ echo
 echo "    $CONN"
 echo
 echo "  Tunnel URL : $URL"
-echo "  ntfy topic : $NTFY_TOPIC"
+echo "  ntfy topic : $NTFY_TOPIC   <- FRESH topic for THIS install"
+echo "               -> paste it into AI-HANDOFF.md (§2) and tell your"
+echo "                  AI in the CHAT (the AI listens to it too)."
 echo "  State dir  : $GLM_DIR"
 echo "----------------------------------------------------------"
 echo "  NOTE: this URL lives ~50 min. The watchdog renews it and"
