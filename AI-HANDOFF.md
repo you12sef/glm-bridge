@@ -120,7 +120,7 @@ For file transfers use `sftp = c.open_sftp()` → `sftp.put(local, remote)` / `s
 | Problem | Fix |
 |---------|-----|
 | SSH died mid-work | It's the 50-min renewal. Re-run §4 → §5. Do NOT re-setup. |
-| Topic has no messages | Watchdog down. Connect via §2 fallback command, then re-run: `setsid nohup bash <repo>/install.sh <USER/REPO> <SERVER NAME> &` — or push the kit files from the repo via SFTP and run install.sh. **Re-running install.sh generates a NEW topic — the user must send it in chat.** |
+| Topic has no messages | Watchdog down. Connect via §2 fallback command, then re-run: `cd <repo-folder> && setsid nohup bash install.sh [SERVER NAME] &` (fully local — no GitHub, and it generates a NEW topic the user must send in chat). **Re-running install.sh generates a NEW topic — the user must send it in chat.** |
 | Server rebooted | `@reboot` crontab auto-restarts the watchdog. Wait ≤2 min then §4. |
 | Need file from the repo on the server | `curl -fsSL https://raw.githubusercontent.com/<USER>/<REPO>/main/<file> -o /tmp/<file>` |
 
@@ -137,7 +137,7 @@ Server-side state (diagnose via SSH): `~/.glm-bridge/` →
 ## 9. Context summary / ملخص سريع
 
 - Built 2026-10-08. ZeroTier was impossible in the AI sandbox (no root/TUN) → replaced
-  by this bridge. Full protocol details: `README.md` in the user's GitHub repo.
+  by this bridge. Full protocol details: `README.md` in the project folder (lives on the server).
 - Kit files: `install.sh` (server one-command installer — generates a FRESH ntfy topic per install), `glm-watchdog.sh` (daemon),
   `glm-bootstrap.sh` (AI-driven remote installer), `discover.py` (optional AI tool),
   `AI-HANDOFF.md` (this file), `README.md`.
