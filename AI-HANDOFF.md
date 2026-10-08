@@ -25,21 +25,24 @@
 ## 2. USER-FILLED BLOCK / يملؤه المستخدم في الشات
 
 ```text
-NTFY TOPIC   : <the USER pastes it in the CHAT — install.sh generates
-               a FRESH topic id on EVERY install; always use the latest
-               topic the user sent. Format example: glmb-fleet-64aaf6b02cad>
+NTFY TOPIC   : <the USER pastes it in the CHAT — glm-bridge.sh generates
+               one per install and it PERSISTS across --stop/--start;
+               always use the latest topic the user sent.
+               Format example: glmb-fleet-64aaf6b02cad>
 SERVER NAME  : <paste — or read it from the RENEW/HEARTBEAT messages>
 SSH USER     : <paste>
 SSH PASSWORD : <paste — chat only, NEVER save into any file>
-FIRST CONNECTION COMMAND (printed by install.sh — use ONLY for first contact
-or if the ntfy topic is unreachable):
+FIRST CONNECTION COMMAND (printed by glm-bridge.sh --start — use ONLY for
+first contact or if the ntfy topic is unreachable):
   ssh -p "<PORT>" <USER>@<LINK>
 ```
 
-> **TOPIC LIFETIME / مهم:** every `install.sh` run generates a NEW ntfy
-> topic. The user sends the CURRENT topic id in the CHAT together with the
-> rest of the info. If discovery on the topic you have returns empty, do
-> NOT conclude the server is down — first ask in chat if the topic changed.
+> **TOPIC LIFETIME / مهم:** the topic is generated once at install and
+> PERSISTS across `--stop` / `--start` cycles (stored in
+> `~/.glm-bridge/state.env`). It changes ONLY via `glm-bridge --new-topic`
+> or after `glm-bridge --uninstall`. The user sends the CURRENT topic in the
+> CHAT. If discovery on the topic you have returns empty, do NOT conclude
+> the server is down — first ask in chat if the topic changed.
 
 ## 3. Golden rule / القاعدة الذهبية
 
@@ -120,11 +123,13 @@ For file transfers use `sftp = c.open_sftp()` → `sftp.put(local, remote)` / `s
 | Problem | Fix |
 |---------|-----|
 | SSH died mid-work | It's the 50-min renewal. Re-run §4 → §5. Do NOT re-setup. |
-| Topic has no messages | Watchdog down. Connect via §2 fallback command, then re-run: `cd <repo-folder> && setsid nohup bash install.sh [SERVER NAME] &` (fully local — no GitHub, and it generates a NEW topic the user must send in chat). **Re-running install.sh generates a NEW topic — the user must send it in chat.** |
+| Topic has no messages | Watchdog down. Connect via §2 fallback command, then run on the server: `bash <project-folder>/glm-bridge.sh --start` (restarts with the SAME topic stored in state). |
 | Server rebooted | `@reboot` crontab auto-restarts the watchdog. Wait ≤2 min then §4. |
-| Need file from the repo on the server | `curl -fsSL https://raw.githubusercontent.com/<USER>/<REPO>/main/<file> -o /tmp/<file>` |
+| Need to stop everything | `bash <project-folder>/glm-bridge.sh --stop` (stops watchdog+tunnels+autostart; the SAME topic returns on `--start`). For full removal: `--uninstall` (also removes cron + PATH + state; topic dies) or `--purge` (also deletes the project folder). |
+| Need a kit file that is missing on the server | The kit is self-contained (no repo). Recreate it on the server via SSH (here-doc / printf) or push it from your sandbox with `sftp.put()` (§5). |
 
 Server-side state (diagnose via SSH): `~/.glm-bridge/` →
+`state.env` (NTFY_TOPIC + SERVER_NAME — the topic source of truth),
 `watchdog.log`, `current.json`, `tunnel_new.log`, `tunnel.pid`, `CONNECT.txt`.
 
 ## 8. Security rules / قواعد الأمان
@@ -138,9 +143,9 @@ Server-side state (diagnose via SSH): `~/.glm-bridge/` →
 
 - Built 2026-10-08. ZeroTier was impossible in the AI sandbox (no root/TUN) → replaced
   by this bridge. Full protocol details: `README.md` in the project folder (lives on the server).
-- Kit files: `install.sh` (server one-command installer — generates a FRESH ntfy topic per install), `glm-watchdog.sh` (daemon),
-  `glm-bootstrap.sh` (AI-driven remote installer), `discover.py` (optional AI tool),
-  `AI-HANDOFF.md` (this file), `README.md`.
+- Kit files: `glm-bridge.sh` (UNIFIED manager: `--start/--stop/--status/--restart/--new-topic/--uninstall/--purge` — generates the topic at first install, persists it in `~/.glm-bridge/state.env`, adds the `glm-bridge` command to PATH via symlink + marked .bashrc block), `bridge/glm-watchdog.sh` (daemon template; the rendered copy runs as `~/.glm-bridge/glm-watchdog.sh`),
+  `bridge/glm-bootstrap.sh` (AI-driven remote installer), `bridge/discover.py` (optional AI tool),
+  `AI-HANDOFF.md` (this file), `README.md`. No GitHub repo — the kit is copied to the server as a plain folder.
 
 ## 10. Notification bridge — two-way comms & approvals / جسر الإشعارات
 
@@ -193,7 +198,7 @@ body; truncate long command output to the first/last few lines.
 
 ```python
 import json, os, sys, time, urllib.request
-TOPIC = "glmb-fleet-XXXXXXXXXXXX"   # current topic: user sends it in the CHAT (fresh per install)
+TOPIC = "glmb-fleet-XXXXXXXXXXXX"   # current topic: user sends it in the CHAT (persists across stop/start)
 STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ntfy_since")
 def load():
     try: st = json.load(open(STATE)); return int(st["since"]), set(st["seen"])
