@@ -38,7 +38,7 @@ bash install.sh                # أو: bash install.sh اسم-الخادم
   GLM-BRIDGE INSTALLED OK
 ----------------------------------------------------------
   Connection command:
-    ssh -p "46085" admin@xxxx.run.pinggy-free.link
+    ssh -p "46085" USERNAME@xxxx.run.pinggy-free.link
 
   Tunnel URL : tcp://xxxx.run.pinggy-free.link:46085
   ntfy topic : glmb-fleet-9b1154b018a3   <- FRESH topic for THIS install
