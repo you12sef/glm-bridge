@@ -23,29 +23,36 @@ root، وبدون أدوات شبكة معقدة.
 ```bash
 # 1) انسخ مجلد المشروع كاملاً إلى خادمك (scp أو SFTP أو git clone — مرة واحدة)
 # 2) من داخل المجلد:
-bash install.sh                # أو: bash install.sh اسم-الخادم
+bash glm-bridge.sh --start
 ```
 
-هذا كل شيء. المُثبّت يتكفل بكل التفاصيل:
+هذا كل شيء. السكريبت الموحّد يتكفل بكل التفاصيل:
 
-1. يولّد **معرّف قناة (topic) جديداً** خاصاً بهذا التثبيت
+1. يولّد **معرّف قناة (topic) جديداً** خاصاً بهذا التثبيت ويحفظه في الحالة
 2. يجهّز الـ watchdog من القالب الموجود بجانبه ويشغّله في الخلفية
 3. يضيف إعادة تشغيل تلقائية بعد إقلاع الخادم (crontab `@reboot`)
-4. ينتظر أول عنوان نفق ثم يطبع ملخصاً كهذا:
+4. **يضيف الأمر `glm-bridge` إلى PATH** — من بعدها تشغّل/توقف المشروع من أي مجلد
+5. ينتظر أول عنوان نفق ثم يطبع ملخصاً كهذا:
 
 ```
 ==========================================================
-  GLM-BRIDGE INSTALLED OK
+  GLM-BRIDGE IS RUNNING
 ----------------------------------------------------------
-  Connection command:
-    ssh -p "46085" USERNAME@xxxx.run.pinggy-free.link
-
-  Tunnel URL : tcp://xxxx.run.pinggy-free.link:46085
-  ntfy topic : glmb-fleet-9b1154b018a3   <- FRESH topic for THIS install
-  Project    : /home/you/glm-bridge (fully local — no GitHub needed)
-  State dir  : /home/you/.glm-bridge
+  Connection command : ssh -p "46085" admin@xxxx.run.pinggy-free.link
+  Current URL        : tcp://xxxx.run.pinggy-free.link:46085
+  ntfy topic         : glmb-fleet-9b1154b018a3
+  Project            : /home/you/glm-bridge
+  State dir          : /home/you/.glm-bridge
+----------------------------------------------------------
+  From any directory :  glm-bridge --status
+  Stop               :  glm-bridge --stop
+  Help               :  glm-bridge --help
 ==========================================================
 ```
+
+> كل مخرجات السكريبت في الترمينل **بالإنجليزية** لتعمل على أي خادم، بينما
+> التوثيق (هذا الملف) عربي أولاً. The username in the connection command is
+> resolved via `id -un` from the account running `glm-bridge.sh` — nothing is hardcoded.
 
 ## الخطوة الأخيرة: أعطِ المعلومات لمساعدك الذكي
 
@@ -58,8 +65,9 @@ bash install.sh                # أو: bash install.sh اسم-الخادم
 سيسحب المساعد العنوان الحالي من القناة، يتصل بالخادم، ويرد عليك:
 `READY — bridge verified on <server>, awaiting orders`
 
-> **مهم:** كل تشغيل لـ `install.sh` يولّد معرّف قناة جديداً. إن أعدت التثبيت،
-> أرسل المعرّف الجديد لمساعدك في الشات — المعرف القديم لن يعمل بعد ذلك.
+> **مهم:** المعرّف محفوظ ويبقى ثابتاً عبر الإيقاف والتشغيل (`--stop` ثم
+> `--start`). يتغير فقط بـ `glm-bridge --new-topic` أو بعد `--uninstall` —
+> عندها أرسل المعرّف الجديد لمساعدك في الشات.
 
 ## التواصل عبر الإشعارات (وسيلة… وليست الغاية)
 
@@ -78,7 +86,7 @@ bash install.sh                # أو: bash install.sh اسم-الخادم
 
 | الملف | ماذا يفعل | أين يعمل |
 |------|-----------|----------|
-| `install.sh` | المُثبّت: يولّد topic جديداً، يجهّز الـ watchdog من القالب المحلي، يشغّله، يطبع ملخص الاتصال | الخادم |
+| `glm-bridge.sh` | **السكريبت الموحّد**: `--start` تثبيت وتشغيل، `--stop` إيقاف، `--status`، `--restart`، `--new-topic`، `--uninstall`/`--purge` — ويضيف الأمر `glm-bridge` إلى PATH | الخادم |
 | `bridge/glm-watchdog.sh` | قالب البرنامج الدائم: يجدد النفق كل 50 دقيقة، نبضة كل 5 دقائق، ينشر العنوان في القناة | الخادم |
 | `bridge/glm-bootstrap.sh` | مُثبّت بديل يستخدمه الـ AI عن بُعد (يأخذ الـ topic كوسيطة، ويجد القالب بجانبه) | الخادم |
 | `bridge/discover.py` | أداة اختيارية: سرد الخوادم الحية / اتصال وتنفيذ / تثبيت عن بُعد | بيئة الـ AI |
@@ -107,8 +115,8 @@ bash install.sh                # أو: bash install.sh اسم-الخادم
   `passwd` بعد انتهاء المشروع
 - معرّف القناة يُعامل كسرّ خفيف: من يعرفه يرى عناوين النفق فقط — اتصال SSH
   نفسه مشفّر من الطرف للطرف، والمرحّل (pinggy) يرى نصاً مشفراً لا أكثر
-- كل تثبيت جديد يولّد معرّفاً جديداً، فحتى لو تسرب معرّف قديم فإن نافذة
-  صلاحيته قصيرة
+- التثبيت الجديد يولّد معرّفاً جديداً، ويمكن تدويره في أي وقت بـ
+  `glm-bridge --new-topic` — فحتى لو تسرّب معرّف فإن نافذة صلاحيته قصيرة
 
 ## المتطلبات
 
@@ -121,9 +129,28 @@ bash install.sh                # أو: bash install.sh اسم-الخادم
 | المشكلة | الحل |
 |---------|------|
 | لا يظهر عنوان بعد التثبيت | انظر `~/.glm-bridge/watchdog.log` و`tunnel_new.log` |
-| القناة لا تعرض أي رسائل | الـ watchdog متوقف أو الخادم بلا إنترنت — اتصل بأمر الاتصال الاحتياطي من ملخص التثبيت، ثم أعد `bash install.sh` |
-| أعدت التثبيت فانقطع اتصال الـ AI | طبيعي — المعرف الجديد يلغي القديم. أرسل المعرّف الجديد له في الشات |
+| القناة لا تعرض أي رسائل | الـ watchdog متوقف أو الخادم بلا إنترنت — `glm-bridge --status` ثم `glm-bridge --restart`، وإن لزم اتصل بأمر الاتصال الاحتياطي |
+| غيّرت المعرّف فانقطع اتصال الـ AI | طبيعي — المعرّف الجديد يلغي القديم. أرسل المعرّف الجديد له في الشات (`--new-topic`) |
 | أُعيد تشغيل الخادم | crontab `@reboot` يعيد تشغيل الـ watchdog تلقائياً خلال دقيقتين، ثم تصله الرسائل كالعادة |
+
+## إدارة المشروع — ملف واحد لكل شيء
+
+كل العمليات تتم عبر سكريبت واحد، وبعد أول `--start` يُضاف الأمر `glm-bridge`
+إلى PATH فتعمل من أي مجلد:
+
+| الأمر | الوظيفة |
+|-------|---------|
+| `bash glm-bridge.sh --start` | تثبيت (أول مرة) + تشغيل |
+| `glm-bridge --stop` | إيقاف كامل: watchdog + نفق + التشغيل التلقائي |
+| `glm-bridge --status` | عرض الحالة |
+| `glm-bridge --restart` | إعادة تشغيل |
+| `glm-bridge --new-topic` | معرّف جديد وإعادة تشغيل — أخبر مساعدك فوراً |
+| `glm-bridge --uninstall` | إيقاف + إزالة الاندماج (cron + PATH + الحالة)، ويبقي مجلد المشروع |
+| `glm-bridge --purge` | مثل `--uninstall` + حذف مجلد المشروع |
+
+> **مهم:** معرّف القناة محفوظ في `~/.glm-bridge/state.env` ويبقى ثابتاً عبر
+> `--stop` ثم `--start` — تواصلك مع مساعدك لن ينقطع. يتغير فقط مع
+> `--new-topic` أو بعد `--uninstall`، وعندها أرسل المعرّف الجديد في الشات.
 
 ---
 
@@ -144,13 +171,13 @@ over SSH, and starts working — no VPN, no ZeroTier, no root.
 
 ```bash
 # copy the whole project folder to the server (once), then from inside it:
-bash install.sh [server-name]
+bash glm-bridge.sh --start
 ```
 
-The installer generates a **fresh ntfy topic id** for this install, renders
-the watchdog from the local template, starts it detached, installs a `@reboot`
-crontab entry, waits for the first tunnel URL, and prints the connection
-command **plus the new topic**.
+The script generates a **fresh ntfy topic id**, renders the watchdog from the
+local template, starts it detached, installs a `@reboot` crontab entry, adds
+the `glm-bridge` command to your PATH, waits for the first tunnel URL, and
+prints the connection command **plus the new topic**.
 
 Then send your AI **in the chat**: the new topic, the SSH username, and the
 password (chat only — never stored in any file). The AI discovers the live
@@ -158,12 +185,18 @@ URL, connects, and replies `READY — awaiting orders`.
 
 ## Good to know
 
-- **Every `install.sh` run creates a new topic.** Re-installing? Send the new
-  topic to your AI in the chat — the old one stops working.
+- **The topic persists across `--stop` / `--start` cycles** (stored in
+  `~/.glm-bridge/state.env`). It only changes with `glm-bridge --new-topic`
+  or after `--uninstall` — then send the new topic to your AI in the chat.
+- One-file management: `glm-bridge --start | --stop | --status | --restart |
+  --new-topic | --uninstall | --purge` — works from any directory after the
+  first `--start`. `--uninstall` keeps the project folder; `--purge` deletes
+  it too.
 - The two-way **notification/approval bridge** (ask permission, report
   results, receive short commands) is fully documented for the AI in
   **`AI-HANDOFF.md`** §10. Remember the philosophy: notifications are a
   *means* — the mission itself arrives in the chat.
+- The printed connection command uses the **username of the account running `glm-bridge.sh`** (resolved via `id -un`) — nothing is hardcoded.
 - `bridge/glm-bootstrap.sh` is the AI-driven alternative installer (it takes
   the topic as an argument and finds the template next to itself), and
   `bridge/discover.py` lists live servers / connects / remote-installs from
