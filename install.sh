@@ -1,26 +1,33 @@
 #!/usr/bin/env bash
 # =====================================================================
-# install.sh — glm-bridge one-command installer
+# install.sh — glm-bridge integrated project installer
 #
-# Downloads the project from GitHub onto THIS server, generates a FRESH
-# ntfy topic id (new on EVERY install), installs & starts the tunnel
-# watchdog, then prints the SSH connection command + the topic id.
+# The whole project lives in THIS folder (no GitHub, no downloads).
+# Run this script from inside the project folder and it will:
+#   1. generate a FRESH ntfy topic id for THIS install
+#   2. render the local watchdog template into ~/.glm-bridge
+#   3. start it detached + add a @reboot crontab entry
+#   4. wait for the first tunnel URL, then print the SSH connection
+#      command + the new topic id
 #
-# Usage (on the server):
-#   bash install.sh <USER/REPO> [server-name]
-#   bash install.sh https://raw.githubusercontent.com/USER/REPO [server-name]
+# Usage (inside the project folder):
+#   bash install.sh [server-name]
 # Example:
-#   bash install.sh myuser/glm-bridge pronet-movies
+#   bash install.sh pronet-movies
 #
-# Requirements: bash, ssh, curl (or wget), sed. No root needed.
-# Re-run safe (repairs/replaces the watchdog) — NOTE: every run generates a NEW ntfy topic id.
+# Requirements: bash, ssh, sed, and (openssl OR /dev/urandom) for the topic id.
+# No root needed. Re-run safe (repairs/replaces the watchdog) — every run
+# generates a NEW ntfy topic id.
 # =====================================================================
 set -u
 
-# ---- EMBEDDED CONFIG (edit here only if you know why) ---------------
-# ntfy.sh registry topic — GENERATED FRESH on every install (public by design).
-# New install => new topic id; the user pastes it into AI-HANDOFF.md (§2)
-# and tells the AI in the chat. Override: export NTFY_TOPIC (rarely needed).
+# ---- project layout (files ship with this repo) --------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WATCHDOG_TEMPLATE="$SCRIPT_DIR/bridge/glm-watchdog.sh"
+
+# ---- ntfy topic: GENERATED FRESH on every install (public by design).
+# New install => new topic id; paste it into AI-HANDOFF.md (§2) and tell
+# your AI in the chat. Override: export NTFY_TOPIC (rarely needed).
 gen_topic() {
     if command -v openssl >/dev/null 2>&1; then
         printf 'glmb-fleet-%s' "$(openssl rand -hex 6)"
@@ -31,76 +38,43 @@ gen_topic() {
     fi
 }
 NTFY_TOPIC="${NTFY_TOPIC:-$(gen_topic)}"
-RENEW_NOTE="watchdog renews the tunnel every 50 min; current URL always on ntfy"
-# ---------------------------------------------------------------------
 
-REPO_ARG="${1:-}"
-SERVER_NAME="${2:-$(hostname)}"
+RENEW_NOTE="watchdog renews the tunnel every 50 min; current URL always on ntfy"
+
+SERVER_NAME="${1:-$(hostname)}"
 GLM_DIR="$HOME/.glm-bridge"
-RAW=""
 
 log()  { echo -e "[install] $*"; }
 fail() { echo -e "[install] ERROR: $*" >&2; exit 1; }
 
-# ---------- normalize repo argument -> raw base URL ----------
-normalize_repo() {
-    local a="${REPO_ARG%/}"
-    a="${a%/install.sh}"
-    case "$a" in
-        https://raw.githubusercontent.com/*)
-            local path="${a#https://raw.githubusercontent.com/}"
-            local segs
-            segs=$(echo "$path" | awk -F/ '{print NF}')
-            if [ "$segs" -ge 4 ]; then RAW="$a"; else RAW="$a/main"; fi
-            ;;
-        https://github.com/*)
-            RAW="https://raw.githubusercontent.com/${a#https://github.com/}/main"
-            ;;
-        */*)
-            RAW="https://raw.githubusercontent.com/$a/main"
-            ;;
-        *)
-            fail "usage: bash install.sh <USER/REPO or raw-url> [server-name]"
-            ;;
-    esac
-}
+# ---------- friendly guard: the old GitHub-arg habit ----------------
+case "${1:-}" in
+    */*|http://*|https://*)
+        fail "install.sh no longer downloads from GitHub — the project is fully local now.
+Run it from inside the project folder:   bash install.sh [server-name]"
+        ;;
+esac
 
-# ---------- fetch a file from the repo (main -> master fallback) ----------
-fetch_file() {
-    local rel="$1" dest="$2" url
-    if command -v curl >/dev/null 2>&1; then
-        url="$RAW/$rel"
-        curl -fsSL --max-time 30 "$url" -o "$dest" && return 0
-        if echo "$RAW" | grep -q '/main$'; then
-            url="${RAW%/main}/master/$rel"
-            curl -fsSL --max-time 30 "$url" -o "$dest" && return 0
-        fi
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q -T 30 -O "$dest" "$RAW/$rel" && return 0
-        if echo "$RAW" | grep -q '/main$'; then
-            wget -q -T 30 -O "$dest" "${RAW%/main}/master/$rel" && return 0
-        fi
-    else
-        fail "need curl or wget to download files"
-    fi
-    fail "cannot download '$rel' from $RAW (check repo is public & branch is main/master)"
-}
+# ---------- sanity: the project must be complete in this folder ------
+[ -f "$WATCHDOG_TEMPLATE" ] || fail "watchdog template not found at:
+  $WATCHDOG_TEMPLATE
+Run this script from inside the glm-bridge project folder."
 
-# ---------- main ----------
-[ -n "$REPO_ARG" ] || fail "usage: bash install.sh <USER/REPO> [server-name]"
-normalize_repo
-log "repo raw base : $RAW"
+grep -q '__TOPIC__' "$WATCHDOG_TEMPLATE" || fail "$WATCHDOG_TEMPLATE does not look like the watchdog template (missing __TOPIC__)."
+
+log "project dir   : $SCRIPT_DIR"
 log "server name   : $SERVER_NAME"
 log "ntfy topic    : $NTFY_TOPIC (generated fresh for this install)"
 
 mkdir -p "$GLM_DIR"
-fetch_file "glm-watchdog.sh" "$GLM_DIR/glm-watchdog.template.sh"
-log "downloaded glm-watchdog.sh"
 
-# render watchdog with embedded topic + server name
+# render watchdog with embedded topic + server name (tmp then mv: safe re-install)
 sed -e "s/__TOPIC__/$NTFY_TOPIC/" -e "s/__SERVER__/$SERVER_NAME/" \
-    "$GLM_DIR/glm-watchdog.template.sh" > "$GLM_DIR/glm-watchdog.sh"
+    "$WATCHDOG_TEMPLATE" > "$GLM_DIR/glm-watchdog.sh.tmp"
+mv "$GLM_DIR/glm-watchdog.sh.tmp" "$GLM_DIR/glm-watchdog.sh"
 chmod +x "$GLM_DIR/glm-watchdog.sh"
+cp -f "$WATCHDOG_TEMPLATE" "$GLM_DIR/glm-watchdog.template.sh" 2>/dev/null || true
+log "watchdog rendered from local template"
 
 # clean slate: stop previous watchdog + all old pinggy tunnels
 pkill -f 'glm-watchdog.sh' 2>/dev/null
@@ -160,6 +134,7 @@ echo "  Tunnel URL : $URL"
 echo "  ntfy topic : $NTFY_TOPIC   <- FRESH topic for THIS install"
 echo "               -> paste it into AI-HANDOFF.md (§2) and tell your"
 echo "                  AI in the CHAT (the AI listens to it too)."
+echo "  Project    : $SCRIPT_DIR (fully local — no GitHub needed)"
 echo "  State dir  : $GLM_DIR"
 echo "----------------------------------------------------------"
 echo "  NOTE: this URL lives ~50 min. The watchdog renews it and"
