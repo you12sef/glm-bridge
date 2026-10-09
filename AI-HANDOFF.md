@@ -8,6 +8,8 @@
 > If the user wants to talk to you through ntfy notifications
 > (approval / command loop), follow §10 — and remember: notifications
 > are a MEANS, the mission itself arrives in the chat.
+> If the user set up a dedicated AI user for you or prefers key auth,
+> follow §11 — it replaces password-in-chat entirely.
 
 ---
 
@@ -30,8 +32,12 @@ NTFY TOPIC   : <the USER pastes it in the CHAT — glm-bridge.sh generates
                always use the latest topic the user sent.
                Format example: glmb-fleet-64aaf6b02cad>
 SERVER NAME  : <paste — or read it from the RENEW/HEARTBEAT messages>
-SSH USER     : <paste>
-SSH PASSWORD : <paste — chat only, NEVER save into any file>
+SSH USER     : <paste — may be the owner's own account OR a DEDICATED
+               'ai-*' user created by glm-bridge (see §11); prefer the
+               dedicated one when provided>
+SSH PASSWORD : <paste — chat only, NEVER save into any file. With a
+               dedicated ai-* user this password is disposable and
+               rotatable (§11.2), and key auth (§11.1) may replace it>
 FIRST CONNECTION COMMAND (printed by glm-bridge.sh --start — use ONLY for
 first contact or if the ntfy topic is unreachable):
   ssh -p "<PORT>" <USER>@<LINK>
@@ -143,7 +149,7 @@ Server-side state (diagnose via SSH): `~/.glm-bridge/` →
 
 - Built 2026-10-08. ZeroTier was impossible in the AI sandbox (no root/TUN) → replaced
   by this bridge. Full protocol details: `README.md` in the project folder (lives on the server).
-- Kit files: `glm-bridge.sh` (UNIFIED manager: `--start/--stop/--status/--restart/--new-topic/--uninstall/--purge` — generates the topic at first install, persists it in `~/.glm-bridge/state.env`, adds the `glm-bridge` command to PATH via symlink + marked .bashrc block), `bridge/glm-watchdog.sh` (daemon template; the rendered copy runs as `~/.glm-bridge/glm-watchdog.sh`),
+- Kit files: `glm-bridge.sh` (UNIFIED manager: `--start/--stop/--status/--restart/--new-topic/--uninstall/--purge` — generates the topic at first install, persists it in `~/.glm-bridge/state.env`, adds the `glm-bridge` command to PATH via symlink + marked .bashrc block; ALSO manages the optional dedicated AI user: `--ai-user create|status|rotate|lock|unlock|remove|key-only`, `--ai-sudo on|off`, `--ai-key add|list|revoke`), `bridge/glm-watchdog.sh` (daemon template; the rendered copy runs as `~/.glm-bridge/glm-watchdog.sh`),
   `bridge/glm-bootstrap.sh` (AI-driven remote installer), `bridge/discover.py` (optional AI tool),
   `AI-HANDOFF.md` (this file), `README.md`. No GitHub repo — the kit is copied to the server as a plain folder.
 
@@ -244,3 +250,50 @@ print("TIMEOUT - no user message")
 - Between your turns nothing runs in the sandbox: if you are idle and the user
   sends an ntfy command, they will ping the chat (any word) to wake you — then
   poll the topic FIRST, execute, and report back via notification + chat.
+
+## 11. Dedicated AI user & key auth / يوزر مخصص ومفاتيح SSH
+
+> The server MAY have a dedicated OS user for you (username `ai-xxxxxxxx`,
+> created by `glm-bridge --ai-user create`). If the user gives you THAT
+> username, use it — never ask for their personal account and never reuse
+> the owner's password. Preference order: 1) SSH key auth, 2) the AI user's
+> own password (disposable, rotatable), NEVER the owner's personal password.
+
+### 11.1 Key auth (preferred)
+
+1. Generate a keypair IN YOUR SANDBOX — the private key never leaves it:
+   `ssh-keygen -t ed25519 -f ~/.glm_keys/id_ed25519 -N ""`
+2. Deliver the PUBLIC key only (it is not a secret — chat or ntfy are both
+   fine): paste it in the chat and ask the user to install it, or publish
+   it to the topic with `Tags: robot`.
+3. The user installs it: `glm-bridge --ai-key add <pubkey-file|->`
+4. Connect with paramiko:
+   `c.connect(host, port, username=AI_USER,
+              key_filename=os.path.expanduser("~/.glm_keys/id_ed25519"), ...)`
+   (keep `allow_agent=False, look_for_keys=False`).
+5. The user can harden further with `glm-bridge --ai-user key-only on`
+   (sshd then rejects passwords for the AI user — brute force impossible).
+
+### 11.2 Password fallback
+
+The AI user's password is generated ON THE SERVER and shown once in the
+owner's terminal; they paste it in the chat. It is disposable: rotate with
+`glm-bridge --ai-user rotate` (new password shown once -> chat), and never
+write it into any file (same rule as §8).
+
+### 11.3 Sudo — explicit only
+
+- Sudo is OFF by default and is toggled explicitly: `glm-bridge --ai-sudo on|off`
+  (check with `glm-bridge --ai-user status`).
+- If sudo is ON: any privileged or destructive command STILL goes through
+  the §10 approval loop FIRST. The AI user's sudo password is its own
+  password — use it only in non-interactive commands on the server.
+- If sudo is OFF: do not attempt privilege escalation — ask the user in chat.
+
+### 11.4 Revocation signals
+
+The owner can instantly `glm-bridge --ai-user lock` (SSH blocked),
+`glm-bridge --ai-user remove` (user deleted) or `glm-bridge --ai-key revoke <fp>`
+(key gone). If SSH starts failing with "Permission denied" while
+RENEW/HEARTBEAT keep flowing normally on the topic, ASK whether the AI user
+was locked/removed or the key revoked — do not conclude the tunnel is broken.
