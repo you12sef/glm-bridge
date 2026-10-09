@@ -86,7 +86,7 @@ bash glm-bridge.sh --start
 
 | الملف | ماذا يفعل | أين يعمل |
 |------|-----------|----------|
-| `glm-bridge.sh` | **السكريبت الموحّد**: `--start` تثبيت وتشغيل، `--stop` إيقاف، `--status`، `--restart`، `--new-topic`، `--uninstall`/`--purge` — ويضيف الأمر `glm-bridge` إلى PATH | الخادم |
+| `glm-bridge.sh` | **السكريبت الموحّد**: `--start` تثبيت وتشغيل، `--stop` إيقاف، `--status`، `--restart`، `--new-topic`، `--uninstall`/`--purge` — يضيف الأمر `glm-bridge` إلى PATH، ويدير يوزر AI مخصص: `--ai-user` و`--ai-sudo` و`--ai-key` | الخادم |
 | `bridge/glm-watchdog.sh` | قالب البرنامج الدائم: يجدد النفق كل 50 دقيقة، نبضة كل 5 دقائق، ينشر العنوان في القناة | الخادم |
 | `bridge/glm-bootstrap.sh` | مُثبّت بديل يستخدمه الـ AI عن بُعد (يأخذ الـ topic كوسيطة، ويجد القالب بجانبه) | الخادم |
 | `bridge/discover.py` | أداة اختيارية: سرد الخوادم الحية / اتصال وتنفيذ / تثبيت عن بُعد | بيئة الـ AI |
@@ -152,6 +152,38 @@ bash glm-bridge.sh --start
 > `--stop` ثم `--start` — تواصلك مع مساعدك لن ينقطع. يتغير فقط مع
 > `--new-topic` أو بعد `--uninstall`، وعندها أرسل المعرّف الجديد في الشات.
 
+## حساب AI مخصص (اختياري — لكن مستحسن)
+
+بشكل افتراضي يتصل مساعدك بحسابك الشخصي، وتقرأ كلمة مرورك الحقيقية في الشات.
+الحل الأنظف: مستخدم نظام منفصل للـ AI وحده، باسم `ai-<رمز عشوائي>`:
+
+```bash
+glm-bridge --ai-user create        # إنشاء اليوزر + توليد باسوورد (يُعرض مرة واحدة)
+glm-bridge --ai-user status        # الحالة: sudo، المفاتيح، القفل
+glm-bridge --ai-user rotate        # باسوورد جديد (يُعرض مرة واحدة)
+glm-bridge --ai-user lock          # حجب فوري لوصول الـ AI (unlock للرجوع)
+glm-bridge --ai-user remove        # حذف اليوزر ومجلده نهائياً
+glm-bridge --ai-sudo on|off        # منح/سحب صلاحيات sudo — خيار صريح وصاخب
+glm-bridge --ai-key add key.pub    # تثبيت مفتاح عام (الطريقة المفضلة)
+glm-bridge --ai-key list           # عرض المفاتيح والبصمات
+glm-bridge --ai-key revoke <بصمة>  # إلغاء مفتاح فوراً
+glm-bridge --ai-user key-only on   # إغلاق مصادقة الباسوورد للـ AI نهائياً
+```
+
+ماذا يحقق هذا؟
+
+- **عزل الاعتماديات** — كلمة مرورك الشخصية لا تلمس الشات أبداً؛ ما يسير فيه
+  بيانات قابلة للإتلاف بأمر واحد (`rotate` أو `remove`)
+- **تدقيق كامل** — كل فعل للـ AI يُسجّل باسمه في `auth.log` و`last`
+- **تحكم صريح** — sudo معطّلة افتراضياً، وتفعيلها يطبع تحذيراً كبيراً، وسحبها
+  بأمر واحد. لا NOPASSWD: أوامر sudo تتطلب كلمة مرور اليوزر نفسه
+- **المفاتيح أولاً** — بيئة الـ AI تولّد زوج مفاتيح محلياً وترسل العام فقط؛
+  ثبتّه بـ `--ai-key add` ثم اجعل الدخول بالمفتاح حصراً بـ `key-only on` —
+  عندها لا يوجد باسوورد يسير في الشات أصلاً، والتخمين مستحيل رياضياً
+
+الأوامر التي تحتاج root تعيد تشغيل نفسها عبر `sudo` — تدخل كلمة sudo **أنت**
+في الطرفية، ولا شيء منها يمر عبر الـ AI.
+
 ---
 
 # glm-bridge (English)
@@ -192,6 +224,14 @@ URL, connects, and replies `READY — awaiting orders`.
   --new-topic | --uninstall | --purge` — works from any directory after the
   first `--start`. `--uninstall` keeps the project folder; `--purge` deletes
   it too.
+- **Optional dedicated AI user**: `glm-bridge --ai-user create` makes an
+  `ai-<random>` OS user with a generated password (shown once), plus
+  `--ai-sudo on|off` (explicit full-sudo toggle, loud warning, no NOPASSWD),
+  `--ai-key add|list|revoke` (SSH public keys — preferred),
+  `--ai-user key-only on|off` (sshd rule: keys only) and `--ai-user lock|
+  unlock|remove|rotate` for instant revocation/rotation. Root-needing
+  actions re-run themselves via sudo when YOU call them. See `AI-HANDOFF.md`
+  §11 for the AI-side protocol.
 - The two-way **notification/approval bridge** (ask permission, report
   results, receive short commands) is fully documented for the AI in
   **`AI-HANDOFF.md`** §10. Remember the philosophy: notifications are a
