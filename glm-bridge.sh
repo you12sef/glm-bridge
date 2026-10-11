@@ -127,23 +127,32 @@ path_remove() {
 # ---------- crontab: auto-start after reboot --------------------------
 cron_add() {
     command -v crontab >/dev/null 2>&1 || { warn "crontab not available — autostart after reboot disabled"; return 0; }
-    ( crontab -l 2>/dev/null | grep -v 'glm-watchdog.sh'
-      echo "@reboot $GLM_DIR/glm-watchdog.sh >> $GLM_DIR/watchdog.log 2>&1" ) | crontab - 2>/dev/null \
-        && log "autostart after reboot: enabled"
+    if ( crontab -l 2>/dev/null | grep -v 'glm-watchdog.sh'
+         echo "@reboot $GLM_DIR/glm-watchdog.sh >> $GLM_DIR/watchdog.log 2>&1" ) | crontab - 2>/dev/null; then
+        log "autostart after reboot: enabled"
+    else
+        warn "crontab - failed — autostart after reboot NOT installed (check: crontab -l)"
+    fi
     return 0
 }
 
 cron_remove() {
     command -v crontab >/dev/null 2>&1 || return 0
     crontab -l 2>/dev/null | grep -q 'glm-watchdog.sh' || return 0
-    ( crontab -l 2>/dev/null | grep -v 'glm-watchdog.sh' ) | crontab - 2>/dev/null \
-        && log "autostart after reboot: removed"
+    if ( crontab -l 2>/dev/null | grep -v 'glm-watchdog.sh' ) | crontab - 2>/dev/null; then
+        log "autostart after reboot: removed"
+    else
+        warn "crontab - failed while removing the @reboot entry — verify manually: crontab -l"
+    fi
     return 0
 }
 
 # ---------- bridge services --------------------------------------------
 stop_services() {
-    if pkill -f 'glm-watchdog.sh' 2>/dev/null; then
+    # Match the watchdog daemon only (bash $GLM_DIR/glm-watchdog.sh),
+    # NOT editors/pagers/grep that happen to mention the same string.
+    # The leading [a-z/]* allows for absolute paths under /home, /bin, etc.
+    if pkill -f 'bash[[:space:]]+[^[:space:]]*glm-watchdog\.sh' 2>/dev/null; then
         log "watchdog: stopped"
     else
         log "watchdog: no process found"
@@ -233,7 +242,7 @@ ai_gen_password() {
 }
 
 ai_state_load() {
-    AI_USER=""; AI_SUDO="off"; AI_CREATED_AT=""; AI_KEY_ONLY="off"
+    AI_USER=""; AI_SUDO="off"; AI_CREATED_AT=""; AI_KEY_ONLY="off"; AI_KEY_PATH=""
     [ -f "$AI_STATE_FILE" ] && . "$AI_STATE_FILE"
     return 0
 }
@@ -244,6 +253,7 @@ ai_state_save() {
       printf 'AI_SUDO=%q\n' "$AI_SUDO"
       printf 'AI_CREATED_AT=%q\n' "$AI_CREATED_AT"
       printf 'AI_KEY_ONLY=%q\n' "$AI_KEY_ONLY"
+      printf 'AI_KEY_PATH=%q\n' "$AI_KEY_PATH"
     } > "$AI_STATE_FILE"
     chmod 600 "$AI_STATE_FILE" 2>/dev/null || true
     if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
@@ -261,7 +271,14 @@ ai_require_user() {
         || die "state points to '$AI_USER' but it does not exist — fix: glm-bridge --ai-user remove (then create)"
 }
 
-ai_ak_file() { printf '/home/%s/.ssh/authorized_keys' "$AI_USER"; }
+ai_ak_file() {
+    # Resolve the AI user's home dir from /etc/passwd instead of assuming
+    # /home/$AI_USER — some systems use /home/users/*, /var/lib/*, etc.
+    local home_dir
+    home_dir="$(getent passwd "$1" 2>/dev/null | cut -d: -f6)"
+    [ -n "$home_dir" ] || home_dir="/home/$1"
+    printf '%s/.ssh/authorized_keys' "$home_dir"
+}
 
 ai_key_only_files_off() {  # remove the rule from the drop-in AND from a marked block
     rm -f "$SSHD_AI_CONF" 2>/dev/null || true
@@ -304,7 +321,11 @@ ai_cmd_create() {
     pass="$(ai_gen_password)"
     useradd -m -s /bin/bash "$AI_USER" || die "useradd failed for $AI_USER"
     printf '%s:%s\n' "$AI_USER" "$pass" | chpasswd || die "could not set the password"
-    chmod 750 "/home/$AI_USER" 2>/dev/null || true
+    # Resolve the actual home directory (some systems use /home/users/* etc.)
+    local ai_home
+    ai_home="$(getent passwd "$AI_USER" 2>/dev/null | cut -d: -f6)"
+    ai_home="${ai_home:-/home/$AI_USER}"
+    chmod 750 "$ai_home" 2>/dev/null || true
     AI_SUDO="off"; AI_CREATED_AT="$(date '+%F %T')"; AI_KEY_ONLY="off"
     ai_state_save
     echo ""
@@ -314,13 +335,180 @@ ai_cmd_create() {
     echo "  Username : $AI_USER"
     echo "  Password : $pass"
     echo "  Sudo     : OFF   (enable explicitly:  glm-bridge --ai-sudo on)"
-    echo "  Home     : /home/$AI_USER (mode 750)"
+    echo "  Home     : $ai_home (mode 750)"
     echo "----------------------------------------------------------"
     echo "  The password is shown ONCE — it lives only in /etc/shadow."
     echo "  PREFERRED: switch to key auth:"
     echo "    glm-bridge --ai-key add <pubkey-file>"
     echo "  If you keep password auth: paste the username + password"
     echo "  to your AI assistant in the CHAT (never into a file)."
+    echo "=========================================================="
+}
+
+# ---------- auto-setup: keypair + user + key-only in one shot ----------
+# DESIGN (v2.3): the PRIVATE key is generated in the AI SANDBOX (not on the
+# server) at ~/.glm_keys/ai-key. Only the PUBLIC key is uploaded to the server
+# and installed into the AI user's authorized_keys. This way every new AI
+# session can connect using the same local private key without re-generating.
+#
+# Called from cmd_start() on a fresh install.
+#
+# The sandbox invokes this helper which:
+#   1. Ensures ~/.glm_keys/ai-key exists locally (generates if missing).
+#   2. Uploads ~/.glm_keys/ai-key.pub to the server via SFTP to a temp file.
+#   3. Re-execs the script on the server via sudo to run ai_do_auto_install
+#      with that temp file as the public key.
+#
+# When --start is invoked directly on the server (not from a sandbox), the
+# keypair is still generated locally on that machine and the private key stays
+# there — the user is responsible for copying it to their AI sandbox once.
+ai_auto_setup() {
+    log "auto-creating dedicated AI user with keypair (no password) ..."
+
+    # 1. Generate keypair LOCALLY (in the caller's home, not on the server).
+    #    For an AI sandbox this is ~/.glm_keys/ai-key; for a manual --start
+    #    on the server it is also ~/.glm_keys/ai-key on that host.
+    local keys_dir="$REAL_HOME/.glm_keys"
+    mkdir -p "$keys_dir" 2>/dev/null || true
+    if [ ! -f "$keys_dir/ai-key" ]; then
+        command -v ssh-keygen >/dev/null 2>&1 \
+            || die "ssh-keygen not found — required for AI user auto-setup. Install openssh-client."
+        ssh-keygen -t ed25519 -f "$keys_dir/ai-key" -N "" \
+            -C "glm-ai@$(hostname)-$(date +%s)" >/dev/null 2>&1 \
+            || die "ssh-keygen failed"
+        chmod 600 "$keys_dir/ai-key"
+        chmod 644 "$keys_dir/ai-key.pub"
+        log "AI keypair generated locally: $keys_dir/ai-key (private, stays here) + .pub (public)"
+    else
+        log "AI keypair already exists locally: $keys_dir/ai-key (reusing)"
+    fi
+
+    # 2. Stage the public key for the server-side installer.
+    #    If we are on the server already, just use the file directly.
+    #    If we are in a sandbox, the caller (an external script) is expected
+    #    to upload $keys_dir/ai-key.pub to the server first; this function
+    #    will then read it via SFTP from a known temp path. For the in-server
+    #    --start path, we just use the local file.
+    local pub_local="$keys_dir/ai-key.pub"
+    local pub_remote="$GLM_DIR/ai-key.pub"   # used when --start runs on the server
+
+    # Copy the public key into $GLM_DIR so ai_do_auto_install can read it
+    # (whether called directly here or via sudo re-exec).
+    mkdir -p "$GLM_DIR" 2>/dev/null || true
+    cp -f "$pub_local" "$pub_remote" 2>/dev/null || true
+    chmod 644 "$pub_remote" 2>/dev/null || true
+
+    # 3. Install via sudo (subprocess — control returns here).
+    if [ "$(id -u)" -eq 0 ]; then
+        ai_do_auto_install "$pub_remote"
+        return $?
+    fi
+
+    if sudo -n true 2>/dev/null; then
+        sudo -n bash "$SELF" --ai-auto-install "$pub_remote"
+    else
+        log "AI user creation needs root — running via sudo (enter YOUR password if prompted)..."
+        if ! sudo bash "$SELF" --ai-auto-install "$pub_remote"; then
+            warn "AI user auto-install failed (sudo unavailable?)."
+            warn "The bridge is still working. Run this manually later:"
+            warn "  sudo bash $SELF --ai-auto-install $pub_remote"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Internal: runs AS ROOT (re-execed via sudo). Creates ai-<rand> user with
+# NO password, installs the given public key, and applies key-only sshd rule.
+# $1 = path to public key file (on this machine)
+# AI_KEY_PATH is recorded as the SANDBOX-side path so the AI knows where to
+# look — it is informational only; the private key never lives on the server.
+ai_do_auto_install() {
+    local pubfile="${1:-}"
+    [ -n "$pubfile" ] || die "--ai-auto-install needs a public key file path"
+    [ -r "$pubfile" ] || die "cannot read public key: $pubfile"
+
+    ai_state_load
+    if [ -n "$AI_USER" ] && ai_user_exists "$AI_USER"; then
+        log "AI user '$AI_USER' already exists — skipping auto-install"
+        log "  (to recreate: glm-bridge --ai-user remove, then re-run --start or --ai-auto-install $pubfile)"
+        return 0
+    fi
+
+    command -v useradd >/dev/null 2>&1 || die "useradd not found (need root)"
+    local i suf
+    AI_USER=""
+    for i in 1 2 3; do
+        suf="$(ai_rand_suffix)"
+        [ -n "$suf" ] || die "could not generate a random suffix"
+        ai_user_exists "ai-$suf" || { AI_USER="ai-$suf"; break; }
+    done
+    [ -n "$AI_USER" ] || die "could not find a free ai-* username"
+
+    # Create user WITHOUT a password (locked from day one — key auth only).
+    useradd -m -s /bin/bash "$AI_USER" || die "useradd failed for $AI_USER"
+    passwd -l "$AI_USER" >/dev/null 2>&1 || true   # belt & suspenders
+
+    local ai_home
+    ai_home="$(getent passwd "$AI_USER" 2>/dev/null | cut -d: -f6)"
+    ai_home="${ai_home:-/home/$AI_USER}"
+    chmod 750 "$ai_home" 2>/dev/null || true
+
+    # Install the public key into ~/.ssh/authorized_keys
+    local sshd_dir akf
+    sshd_dir="$ai_home/.ssh"
+    akf="$(ai_ak_file "$AI_USER")"
+    install -d -m 700 "$sshd_dir" 2>/dev/null || { mkdir -p "$sshd_dir"; chmod 700 "$sshd_dir"; }
+    chown "$AI_USER" "$sshd_dir" 2>/dev/null || true
+    cp -f "$pubfile" "$akf"
+    chmod 600 "$akf"
+    chown "$AI_USER" "$akf" 2>/dev/null || true
+
+    # Save state BEFORE touching sshd (so we know who to clean up if it fails)
+    AI_SUDO="off"; AI_CREATED_AT="$(date '+%F %T')"; AI_KEY_ONLY="off"
+    # AI_KEY_PATH is the SANDBOX-side path (informational; the private key
+    # never lives on the server). We use the conventional sandbox location.
+    AI_KEY_PATH="$REAL_HOME/.glm_keys/ai-key"
+    ai_state_save
+
+    # Apply key-only sshd rule (inline of ai_cmd_key_only to avoid extra calls)
+    if [ -d /etc/ssh/sshd_config.d ] && grep -Eiq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config.d' "$SSHD_MAIN" 2>/dev/null; then
+        printf 'Match User %s\n    PasswordAuthentication no\n    KbdInteractiveAuthentication no\n' "$AI_USER" > "$SSHD_AI_CONF"
+    else
+        cp -f "$SSHD_MAIN" "$SSHD_MAIN.glm-backup" 2>/dev/null || true
+        { echo "# >>> glm-bridge ai-user >>>"
+          printf 'Match User %s\n    PasswordAuthentication no\n    KbdInteractiveAuthentication no\n' "$AI_USER"
+          echo "# <<< glm-bridge ai-user <<<"
+        } >> "$SSHD_MAIN"
+    fi
+    if ai_sshd_validate_reload; then
+        AI_KEY_ONLY="on"; ai_state_save
+        log "key-only SSH enabled for '$AI_USER' — sshd rejects passwords for this user."
+    else
+        ai_key_only_files_off
+        [ -f "$SSHD_MAIN.glm-backup" ] && cp -f "$SSHD_MAIN.glm-backup" "$SSHD_MAIN"
+        die "sshd config invalid — changes rolled back. AI user '$AI_USER' was created but key-only NOT applied."
+    fi
+
+    local fp
+    fp="$(ssh-keygen -lf "$pubfile" 2>/dev/null | awk '{print $2" "$4}')"
+    echo ""
+    echo "=========================================================="
+    echo "  DEDICATED AI USER CREATED  (key-based, no password)"
+    echo "----------------------------------------------------------"
+    echo "  Username        : $AI_USER"
+    echo "  Auth mode       : SSH key only (password locked)"
+    echo "  Public key      : $akf  (on the server)"
+    echo "  Private key     : $AI_KEY_PATH  (in the AI SANDBOX — never on the server)"
+    echo "  Key fingerprint : $fp"
+    echo "  Sudo            : OFF   (enable:  glm-bridge --ai-sudo on)"
+    echo "  Home            : $ai_home (mode 750)"
+    echo "----------------------------------------------------------"
+    echo "  HOW THE AI CONNECTS (the private key is already in its sandbox):"
+    echo "    paramiko: c.connect(host, port, username='$AI_USER',"
+    echo "              key_filename='$AI_KEY_PATH',"
+    echo "              allow_agent=False, look_for_keys=False)"
+    echo "  Verify the fingerprint matches what paramiko reports on first connect."
     echo "=========================================================="
 }
 
@@ -351,10 +539,10 @@ ai_cmd_status() {
         P|PS) locked="set" ;;
         NP)   locked="not set" ;;
     esac
-    if [ -r "$(ai_ak_file)" ]; then
-        keys_s="$(grep -cE '^(ssh-|ecdsa-sha2-|sk-)' "$(ai_ak_file)" 2>/dev/null)"
+    if [ -r "$(ai_ak_file "$AI_USER")" ]; then
+        keys_s="$(grep -cE '^(ssh-|ecdsa-sha2-|sk-)' "$(ai_ak_file "$AI_USER")" 2>/dev/null)"
     elif [ "$(id -u)" -eq 0 ] || sudo -n true 2>/dev/null; then
-        keys_s="$(sudo -n grep -cE '^(ssh-|ecdsa-sha2-|sk-)' "$(ai_ak_file)" 2>/dev/null)"
+        keys_s="$(sudo -n grep -cE '^(ssh-|ecdsa-sha2-|sk-)' "$(ai_ak_file "$AI_USER")" 2>/dev/null)"
     fi
     keys_s="${keys_s:-run with sudo to see}"
     echo "  Username : $AI_USER"
@@ -421,6 +609,7 @@ ai_cmd_remove() {
         return 0
     fi
     if [ "${AI_ARGS[0]:-}" != "--yes" ] && [ "$YES" != 1 ]; then
+        local ans=""
         printf "[glm-bridge] delete user '%s' AND its home directory? Type the username to confirm: " "$AI_USER"
         read -r ans
         [ "$ans" = "$AI_USER" ] || { log "cancelled."; return 0; }
@@ -496,8 +685,11 @@ ai_key_add() {
         ssh-ed25519\ AAAA*|ssh-rsa\ AAAA*|ecdsa-sha2-*\ AAAA*|sk-ssh-ed25519@openssh.com\ AAAA*|sk-ecdsa-sha2-nistp256@openssh.com\ AAAA*) ;;
         *) die "not an OpenSSH public key (expected: ssh-ed25519 AAAA... [comment])" ;;
     esac
-    local sshd_dir="/home/$AI_USER/.ssh" akf
-    akf="$(ai_ak_file)"
+    local sshd_dir akf
+    # Resolve actual home dir (some systems use /home/users/* etc.)
+    sshd_dir="$(getent passwd "$AI_USER" 2>/dev/null | cut -d: -f6)"
+    sshd_dir="${sshd_dir:-/home/$AI_USER}/.ssh"
+    akf="$(ai_ak_file "$AI_USER")"
     install -d -m 700 "$sshd_dir" 2>/dev/null || { mkdir -p "$sshd_dir"; chmod 700 "$sshd_dir"; }
     chown "$AI_USER" "$sshd_dir" 2>/dev/null || true
     if [ -f "$akf" ] && grep -qxF "$line" "$akf" 2>/dev/null; then
@@ -514,7 +706,7 @@ ai_key_add() {
 
 ai_key_list() {
     ai_require_user
-    local akf; akf="$(ai_ak_file)"
+    local akf; akf="$(ai_ak_file "$AI_USER")"
     echo "=========================================================="
     echo "  SSH KEYS for AI user '$AI_USER'"
     echo "----------------------------------------------------------"
@@ -535,7 +727,7 @@ ai_key_revoke() {
     require_root --ai-key revoke "$fp"
     ai_require_user
     local akf tmpf newf ltmp removed=0 fpline
-    akf="$(ai_ak_file)"
+    akf="$(ai_ak_file "$AI_USER")"
     [ -r "$akf" ] || die "cannot read $akf (no keys installed?)"
     tmpf="$(mktemp)"; newf="$(mktemp)"; ltmp="$(mktemp)"
     cp -f "$akf" "$tmpf"
@@ -628,6 +820,9 @@ cmd_start() {
     render_watchdog
     log "watchdog rendered from local template"
     path_install
+    if [ "$fresh" = 1 ]; then
+        ai_auto_setup || warn "AI user auto-setup did not complete — bridge still works; run 'glm-bridge --ai-user create' later"
+    fi
     stop_services
     rm -f "$GLM_DIR/tunnel_new.log" "$GLM_DIR/current.json" "$GLM_DIR/tunnel.pid"
     launch_watchdog
@@ -640,8 +835,15 @@ cmd_start() {
     local url
     if url="$(wait_url 30)"; then
         url_parts "$url"
-        local conn
-        conn="ssh -p \"$PORT\" $(id -un 2>/dev/null || printf '%s' "${USER:-unknown}")@$HOST"
+        local conn ssh_user
+        ai_state_load
+        if [ -n "$AI_USER" ] && ai_user_exists "$AI_USER"; then
+            ssh_user="$AI_USER"
+            conn="ssh -i $AI_KEY_PATH -p \"$PORT\" $ssh_user@$HOST"
+        else
+            ssh_user="$(id -un 2>/dev/null || printf '%s' "${USER:-unknown}")"
+            conn="ssh -p \"$PORT\" $ssh_user@$HOST"
+        fi
         cat > "$GLM_DIR/CONNECT.txt" <<EOF
 generated : $(date '+%F %T')
 topic     : $TOPIC
@@ -658,6 +860,19 @@ EOF
         echo "  ntfy topic         : $TOPIC"
         echo "  Project            : $SCRIPT_DIR"
         echo "  State dir          : $GLM_DIR"
+        if [ -n "$AI_USER" ] && ai_user_exists "$AI_USER"; then
+            echo "----------------------------------------------------------"
+            echo "  Dedicated AI user  : $AI_USER  (key-based auth)"
+            echo "  Private key (sandbox) : $AI_KEY_PATH"
+            echo "  Public key (server)    : $(ai_ak_file "$AI_USER")"
+            local pub_for_fp="$GLM_DIR/ai-key.pub"
+            [ -r "$pub_for_fp" ] || pub_for_fp="$(ai_ak_file "$AI_USER")"
+            echo "  Key fingerprint    : $(ssh-keygen -lf "$pub_for_fp" 2>/dev/null | awk '{print $2" "$4}')"
+            echo "  Auth mode          : key-only=${AI_KEY_ONLY}, sudo=${AI_SUDO}"
+            echo "  >>> The private key is in the AI sandbox at $AI_KEY_PATH <<<"
+            echo "  >>> If missing, the AI must generate it: ssh-keygen -t ed25519 -f $AI_KEY_PATH -N \"\" <<<"
+            echo "  >>> then upload the .pub: glm-bridge --ai-key add $AI_KEY_PATH.pub <<<"
+        fi
         echo "----------------------------------------------------------"
         echo "  From any directory :  glm-bridge --status"
         echo "  Stop               :  glm-bridge --stop"
@@ -687,7 +902,7 @@ cmd_stop() {
 cmd_status() {
     load_state
     local pid="" run_s="stopped" url="" cron_s="disabled" link_s="not installed"
-    pid="$(pgrep -f 'glm-watchdog.sh' 2>/dev/null | head -1)"
+    pid="$(pgrep -f 'bash[[:space:]]+[^[:space:]]*glm-watchdog\.sh' 2>/dev/null | head -1)"
     if [ -n "$pid" ]; then
         run_s="running (PID $pid, up $(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' '))"
     fi
@@ -695,10 +910,38 @@ cmd_status() {
     crontab -l 2>/dev/null | grep -q 'glm-watchdog.sh' && cron_s="enabled"
     [ -L "$BIN_LINK" ] && link_s="installed ($BIN_LINK)"
     ai_state_load
-    local ai_s="(none — optional: glm-bridge --ai-user create)"
+    local ai_s="(none — auto-created on first --start; or run: glm-bridge --ai-user create)"
+    local ai_fp="(none)" ai_key_path="(none)" ai_last="(no login yet)" ai_auth="(n/a)"
     if [ -n "$AI_USER" ]; then
-        ai_s="$AI_USER (sudo: $AI_SUDO)"
-        ai_user_exists "$AI_USER" || ai_s="$AI_USER (MISSING on system!)"
+        if ai_user_exists "$AI_USER"; then
+            ai_s="$AI_USER"
+            # Key fingerprint (from the installed authorized_keys)
+            local akf
+            akf="$(ai_ak_file "$AI_USER")"
+            if [ -r "$akf" ]; then
+                ai_fp="$(ssh-keygen -lf "$akf" 2>/dev/null | awk '{print $2" ("$4")"}')"
+                [ -n "$ai_fp" ] || ai_fp="(unreadable)"
+            elif [ "$(id -u)" -eq 0 ] || sudo -n true 2>/dev/null; then
+                ai_fp="$(sudo -n ssh-keygen -lf "$akf" 2>/dev/null | awk '{print $2" ("$4")"}')"
+                [ -n "$ai_fp" ] || ai_fp="(run with sudo to see)"
+            else
+                ai_fp="(run with sudo to see)"
+            fi
+            # Private key path (only if tracked)
+            ai_key_path="${AI_KEY_PATH:-(not tracked)}"
+            # Auth mode label
+            if [ "$AI_KEY_ONLY" = "on" ]; then
+                ai_auth="key-only (passwords rejected by sshd)"
+            else
+                ai_auth="password allowed (key-only OFF)"
+            fi
+            # Last login (from `last`)
+            ai_last="$(last -n 1 "$AI_USER" 2>/dev/null | head -1 | tr -s ' ')"
+            [ -n "$ai_last" ] || ai_last="(no login yet)"
+        else
+            ai_s="$AI_USER (MISSING on system!)"
+            ai_fp="—"; ai_key_path="—"; ai_last="—"; ai_auth="—"
+        fi
     fi
     echo "=========================================================="
     echo "  GLM-BRIDGE — STATUS (v$VERSION)"
@@ -709,9 +952,15 @@ cmd_status() {
     echo "  Server name        : ${NAME:-$(hostname)}"
     echo "  Autostart @reboot  : $cron_s"
     echo "  Global command     : $link_s"
-    echo "  Dedicated AI user  : $ai_s"
     echo "  Project folder     : $SCRIPT_DIR"
     echo "  State dir          : $GLM_DIR"
+    echo "----------------------------------------------------------"
+    echo "  Dedicated AI user  : $ai_s"
+    echo "  Auth mode          : $ai_auth"
+    echo "  Key fingerprint    : $ai_fp"
+    echo "  Private key (sandbox) : $ai_key_path"
+    echo "  Sudo               : ${AI_SUDO:-off}"
+    echo "  Last login         : $ai_last"
     echo "----------------------------------------------------------"
     echo "  Live log: tail -f $GLM_DIR/watchdog.log"
     echo "=========================================================="
@@ -746,6 +995,7 @@ cmd_new_topic() {
 
 cmd_uninstall() {
     load_state
+    local ans=""
     if [ "$YES" != 1 ]; then
         printf "[glm-bridge] services stop and cron + PATH + state are removed. Continue? (y/N): "
         read -r ans
@@ -794,6 +1044,9 @@ Usage:
   bash glm-bridge.sh --help         this help
 
 Dedicated AI user (optional; uses sudo when YOU run these):
+  --start                               also auto-creates an ai-<random> user +
+                                         ed25519 keypair on FIRST install
+                                         (key-only auth, password locked)
   glm-bridge --ai-user create         new user ai-<random> + password (shown ONCE)
   glm-bridge --ai-user status         AI user, sudo state, keys, lock state
   glm-bridge --ai-user rotate         new password for the AI user (shown ONCE)
@@ -804,6 +1057,9 @@ Dedicated AI user (optional; uses sudo when YOU run these):
   glm-bridge --ai-key add <file|->    install a public key ('-' = read stdin)
   glm-bridge --ai-key list            list installed keys + fingerprints
   glm-bridge --ai-key revoke <fp>     remove keys matching a fingerprint prefix
+  glm-bridge --status                 shows the AI username, key fingerprint,
+                                       private key path, key-only/sudo state,
+                                       and last login
 
 Flags: --yes (skip prompts) | --no-wait (skip URL wait)
        --name X (server name, first install) | --topic X (force topic, first install)
@@ -838,6 +1094,9 @@ while [ $# -gt 0 ]; do
         --ai-key)
             [ -n "${2:-}" ] || die "--ai-key needs a subcommand (add|list|revoke)"
             ACTION="ai-key"; AI_SUB="$2"; shift 2; AI_ARGS=("$@"); break ;;
+        --ai-auto-install)
+            [ -n "${2:-}" ] || die "--ai-auto-install needs a public key file path"
+            ACTION="ai-auto-install"; AI_SUB="$2"; shift 2; AI_ARGS=("$@"); break ;;
         --version|-V)          echo "glm-bridge v$VERSION"; exit 0 ;;
         -h|--help|help)        cmd_help; exit 0 ;;
         *)                     die "unknown option: $1  (try --help)" ;;
@@ -866,4 +1125,5 @@ case "$ACTION" in
         esac ;;
     ai-sudo)   ai_cmd_sudo "$AI_SUB" ;;
     ai-key)    ai_cmd_key "$AI_SUB" ${AI_ARGS[@]+"${AI_ARGS[@]}"} ;;
+    ai-auto-install) ai_do_auto_install "$AI_SUB" ;;
 esac
