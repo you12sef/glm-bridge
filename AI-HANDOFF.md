@@ -253,47 +253,113 @@ print("TIMEOUT - no user message")
 
 ## 11. Dedicated AI user & key auth / يوزر مخصص ومفاتيح SSH
 
-> The server MAY have a dedicated OS user for you (username `ai-xxxxxxxx`,
-> created by `glm-bridge --ai-user create`). If the user gives you THAT
-> username, use it — never ask for their personal account and never reuse
-> the owner's password. Preference order: 1) SSH key auth, 2) the AI user's
-> own password (disposable, rotatable), NEVER the owner's personal password.
+> The server has a dedicated OS user for you (username `ai-xxxxxxxx`,
+> created automatically on first `glm-bridge --start`). Auth is **SSH key
+> only** — there is no password to leak. **The keypair is generated in
+> YOUR sandbox**, not on the server: the private key stays at
+> `~/.glm_keys/ai-key` and never leaves; only the public key was uploaded
+> to the server once and installed into `~ai/.ssh/authorized_keys`.
 
-### 11.1 Key auth (preferred)
+### 11.1 Where the private key lives — READ THIS FIRST
 
-1. Generate a keypair IN YOUR SANDBOX — the private key never leaves it:
-   `ssh-keygen -t ed25519 -f ~/.glm_keys/id_ed25519 -N ""`
-2. Deliver the PUBLIC key only (it is not a secret — chat or ntfy are both
-   fine): paste it in the chat and ask the user to install it, or publish
-   it to the topic with `Tags: robot`.
-3. The user installs it: `glm-bridge --ai-key add <pubkey-file|->`
-4. Connect with paramiko:
-   `c.connect(host, port, username=AI_USER,
-              key_filename=os.path.expanduser("~/.glm_keys/id_ed25519"), ...)`
-   (keep `allow_agent=False, look_for_keys=False`).
-5. The user can harden further with `glm-bridge --ai-user key-only on`
-   (sshd then rejects passwords for the AI user — brute force impossible).
+**Before doing anything else, check for the private key in your sandbox:**
 
-### 11.2 Password fallback
+```bash
+ls -la ~/.glm_keys/ai-key 2>/dev/null
+```
 
-The AI user's password is generated ON THE SERVER and shown once in the
-owner's terminal; they paste it in the chat. It is disposable: rotate with
-`glm-bridge --ai-user rotate` (new password shown once -> chat), and never
-write it into any file (same rule as §8).
+- **If it exists** → use it to connect (§11.2). Do NOT generate a new key.
+- **If it does NOT exist** → your sandbox was reset. You have two options:
+  1. **Regenerate + re-install** (cleanest, ~30 seconds):
+     ```bash
+     mkdir -p ~/.glm_keys
+     ssh-keygen -t ed25519 -f ~/.glm_keys/ai-key -N "" -C "glm-ai@$(hostname)"
+     chmod 600 ~/.glm_keys/ai-key
+     # Then ask the owner in chat to run:
+     #   glm-bridge --ai-key add ~/.glm_keys/ai-key.pub
+     # (the .pub is not secret — safe to paste in chat or ntfy)
+     ```
+  2. **Ask the owner** to re-run `glm-bridge --start` (it re-installs the
+     auto-generated key). This requires the owner, not you.
 
-### 11.3 Sudo — explicit only
+> ⚠️ NEVER generate a new keypair without first checking `~/.glm_keys/ai-key`.
+> Doing so creates a second key that the server doesn't know about, and you'll
+> be stuck waiting for the owner to install it — exactly the trap that the
+> v2.3 design fixes.
 
-- Sudo is OFF by default and is toggled explicitly: `glm-bridge --ai-sudo on|off`
-  (check with `glm-bridge --ai-user status`).
+### 11.2 How YOU (the AI) connect
+
+1. Discover the current tunnel URL from the ntfy topic (§4).
+2. Read the AI username + fingerprint from `glm-bridge --status` (§11.3).
+3. Connect with paramiko using the **local** private key:
+   ```python
+   import paramiko
+   c = paramiko.SSHClient()
+   c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+   c.connect(host, port,
+             username=AI_USER,                   # ai-<rand> from --status
+             key_filename=os.path.expanduser('~/.glm_keys/ai-key'),
+             allow_agent=False, look_for_keys=False,
+             timeout=25, banner_timeout=25, auth_timeout=25)
+   ```
+4. **Verify the fingerprint** — paramiko prints it on first connect. It must
+   match the `Key fingerprint` field from `--status`. If it doesn't, abort
+   (possible MITM) and ask the owner in chat.
+5. If you get `Authentication failed`:
+   - Check that `~/.glm_keys/ai-key` exists (§11.1).
+   - Check that the key fingerprint matches `--status`. If the sandbox was
+     reset and you regenerated a new key, the owner must install the new
+     `.pub` (§11.1 option 1).
+   - Do NOT conclude the tunnel is broken — RENEW/HEARTBEAT keeps flowing
+     even when auth fails.
+
+### 11.3 Reading the AI user info from `--status`
+
+`glm-bridge --status` prints everything you need:
+- `Dedicated AI user` — the `ai-<rand>` username
+- `Auth mode` — `key-only (passwords rejected by sshd)` (this is what you want)
+- `Key fingerprint` — SHA256 fingerprint of the installed public key
+  (must match what paramiko reports on first connect — verify to detect MITM)
+- `Private key (sandbox)` — where the private key SHOULD be in your sandbox:
+  `~/.glm_keys/ai-key`. If the path is shown but the file is missing, see §11.1.
+- `Sudo` — `off` by default; `on` if the owner enabled it
+- `Last login` — last time you (or anyone) connected as this user
+
+### 11.4 Sudo — explicit only
+
+- Sudo is OFF by default and is toggled explicitly: `glm-bridge --ai-sudo on|off`.
 - If sudo is ON: any privileged or destructive command STILL goes through
-  the §10 approval loop FIRST. The AI user's sudo password is its own
-  password — use it only in non-interactive commands on the server.
-- If sudo is OFF: do not attempt privilege escalation — ask the user in chat.
+  the §10 approval loop FIRST.
+- If sudo is OFF: do not attempt privilege escalation — ask the owner in chat.
+  The AI user has no sudo password (it was never set), so `sudo` will fail
+  anyway; this is by design.
 
-### 11.4 Revocation signals
+### 11.5 Revocation signals
 
-The owner can instantly `glm-bridge --ai-user lock` (SSH blocked),
-`glm-bridge --ai-user remove` (user deleted) or `glm-bridge --ai-key revoke <fp>`
-(key gone). If SSH starts failing with "Permission denied" while
-RENEW/HEARTBEAT keep flowing normally on the topic, ASK whether the AI user
-was locked/removed or the key revoked — do not conclude the tunnel is broken.
+The owner can instantly:
+- `glm-bridge --ai-user lock` → SSH blocked (nologin shell + password lock)
+- `glm-bridge --ai-user remove` → user deleted + home removed + key gone
+- `glm-bridge --ai-key revoke <fp>` → that specific key removed from authorized_keys
+
+If SSH starts failing with "Permission denied" while RENEW/HEARTBEAT keep
+flowing normally on the topic, ASK whether the AI user was locked/removed
+or the key revoked — do not conclude the tunnel is broken.
+
+### 11.6 Architecture — why the key lives in the sandbox
+
+**Design principle:** the private key is generated ONCE in the AI sandbox and
+never leaves it. Only the public key travels to the server. This way:
+
+- Every new AI session finds the key already present at `~/.glm_keys/ai-key`
+  and connects immediately — no key-generation round-trip, no waiting for the
+  owner to install anything.
+- The server never holds the private key, so compromising the server does not
+  compromise the AI's identity.
+- Rotating the key is the AI's choice (regenerate locally + ask owner to
+  install the new `.pub`), not the server's.
+
+**Old design (v2.2, deprecated):** the keypair was generated on the server and
+the AI was expected to `scp` the private key down. This failed in practice
+because new AI sessions didn't know the key existed and generated their own,
+creating a deadlock where the AI waited forever for the owner to install a
+key the server had never seen.
