@@ -964,6 +964,83 @@ cmd_status() {
     echo "----------------------------------------------------------"
     echo "  Live log: tail -f $GLM_DIR/watchdog.log"
     echo "=========================================================="
+    # Append the AI handoff snippet so the user can grab just the part
+    # they need to paste in chat for their AI assistant.
+    print_handoff_snippet
+}
+
+# ---------- handoff snippet (just the lines to paste in chat) ----------
+# Detects whether we're running over an SSH session — if so, skip the
+# clipboard copy (it would land on the wrong machine anyway). The snippet
+# is always printed; the clipboard part is best-effort and local-only.
+print_handoff_snippet() {
+    load_state
+    ai_state_load
+
+    # Compute the AI user info we want to show
+    local ai_user_str="(none — run: glm-bridge --start)"
+    local ai_fp_str="(none)"
+    local ai_key_path_str="(none)"
+
+    if [ -n "$AI_USER" ] && ai_user_exists "$AI_USER"; then
+        ai_user_str="$AI_USER"
+        ai_key_path_str="${AI_KEY_PATH:-(not tracked)}"
+        # Key fingerprint (try to read authorized_keys directly; if not readable
+        # and we have sudo, use it; otherwise mark as needing sudo)
+        local akf
+        akf="$(ai_ak_file "$AI_USER")"
+        if [ -r "$akf" ]; then
+            ai_fp_str="$(ssh-keygen -lf "$akf" 2>/dev/null | awk '{print $2}')"
+        elif [ "$(id -u)" -eq 0 ] || sudo -n true 2>/dev/null; then
+            ai_fp_str="$(sudo -n ssh-keygen -lf "$akf" 2>/dev/null | awk '{print $2}')"
+        else
+            ai_fp_str="(run: sudo glm-bridge --handoff)"
+        fi
+        [ -n "$ai_fp_str" ] || ai_fp_str="(unreadable)"
+    fi
+
+    # Build the snippet as a single string (so we can also copy it to clipboard)
+    local snip=""
+    snip+="=== GLM-BRIDGE AI HANDOFF ==="$'\n'
+    snip+="ntfy topic      : ${TOPIC:-(not installed)}"$'\n'
+    snip+="AI username      : $ai_user_str"$'\n'
+    snip+="Key fingerprint : $ai_fp_str"$'\n'
+    snip+="Private key     : $ai_key_path_str"$'\n'
+    snip+="============================="$'\n'
+    snip+="Discover the live URL via the ntfy topic (AI-HANDOFF.md §4)."$'\n'
+    snip+="Connect with paramiko: c.connect(host, port, username=AI_USER,"$'\n'
+    snip+="  key_filename='$ai_key_path_str', allow_agent=False, look_for_keys=False)"
+
+    # Print the snippet
+    echo ""
+    echo "###### AI HANDOFF SNIPPET — paste this in chat for your AI ######"
+    printf '%s\n' "$snip"
+    echo "################################################################"
+
+    # Smart clipboard copy: only if we're NOT in an SSH session
+    # (otherwise the clipboard is the server's, not the user's local machine)
+    if [ -z "${SSH_CONNECTION:-}${SSH_CLIENT:-}${SSH_TTY:-}" ]; then
+        local clip_tool=""
+        for t in xclip xsel pbcopy wl-copy; do
+            if command -v "$t" >/dev/null 2>&1; then
+                clip_tool="$t"
+                break
+            fi
+        done
+        if [ -n "$clip_tool" ]; then
+            case "$clip_tool" in
+                xclip)        printf '%s' "$snip" | xclip -selection clipboard 2>/dev/null && echo "[copied to clipboard via xclip]" ;;
+                xsel)         printf '%s' "$snip" | xsel --clipboard --input 2>/dev/null && echo "[copied to clipboard via xsel]" ;;
+                pbcopy)       printf '%s' "$snip" | pbcopy 2>/dev/null && echo "[copied to clipboard via pbcopy]" ;;
+                wl-copy)      printf '%s' "$snip" | wl-copy 2>/dev/null && echo "[copied to clipboard via wl-copy]" ;;
+            esac
+        else
+            echo "[no clipboard tool found — copy the snippet manually]"
+        fi
+    else
+        # We're inside SSH — don't try to copy
+        echo "[SSH session detected — clipboard copy skipped; copy the snippet manually]"
+    fi
 }
 
 cmd_new_topic() {
@@ -1036,7 +1113,8 @@ glm-bridge — keeps your AI assistant connected to this server (one file does i
 Usage:
   bash glm-bridge.sh --start        install (first time) + start
   bash glm-bridge.sh --stop         full stop
-  bash glm-bridge.sh --status       show status
+  bash glm-bridge.sh --status       show status (+ AI handoff snippet at the end)
+  bash glm-bridge.sh --handoff      print ONLY the AI handoff snippet (paste-ready)
   bash glm-bridge.sh --restart      restart
   bash glm-bridge.sh --new-topic    new topic (tell your AI assistant!)
   bash glm-bridge.sh --uninstall    remove integration (keeps project folder)
@@ -1077,6 +1155,7 @@ while [ $# -gt 0 ]; do
         --start|start)         ACTION="start" ;;
         --stop|stop)           ACTION="stop" ;;
         --status|status)       ACTION="status" ;;
+        --handoff|handoff)     ACTION="handoff" ;;
         --restart|restart)     ACTION="restart" ;;
         --new-topic|new-topic) ACTION="new-topic" ;;
         --uninstall|uninstall) ACTION="uninstall" ;;
@@ -1109,6 +1188,7 @@ case "$ACTION" in
     start)     cmd_start ;;
     stop)      cmd_stop ;;
     status)    cmd_status ;;
+    handoff)   print_handoff_snippet ;;
     restart)   log "restarting..."; cmd_start ;;
     new-topic) cmd_new_topic ;;
     uninstall) cmd_uninstall ;;
