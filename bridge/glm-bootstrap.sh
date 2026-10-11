@@ -40,7 +40,9 @@ chmod +x "$GLM_DIR/glm-watchdog.sh"
 cp -f "$SRC" "$GLM_DIR/glm-watchdog.template.sh" 2>/dev/null || true
 
 # stop previous watchdog + all old pinggy tunnels (clean slate)
-pkill -f 'glm-watchdog.sh' 2>/dev/null
+# Match only the watchdog daemon (bash .../glm-watchdog.sh), NOT editors/pagers
+# that happen to mention the same string.
+pkill -f 'bash[[:space:]]+[^[:space:]]*glm-watchdog\.sh' 2>/dev/null
 pkill -f 'ssh -p 443 -R0:127.0.0.1:22' 2>/dev/null
 sleep 2
 
