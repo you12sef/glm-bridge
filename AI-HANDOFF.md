@@ -26,6 +26,11 @@
 
 ## 2. USER-FILLED BLOCK / يملؤه المستخدم في الشات
 
+> **The owner can now generate a paste-ready snippet with**:
+>   `glm-bridge --handoff`
+> This prints ONLY the four lines below (no PID, no uptime, no logs).
+> The owner pastes them in the chat — that's all you need to start.
+
 ```text
 NTFY TOPIC   : <the USER pastes it in the CHAT — glm-bridge.sh generates
                one per install and it PERSISTS across --stop/--start;
