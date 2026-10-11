@@ -76,8 +76,23 @@ renew() {
         CUR_URL="$new_url"
         START_TS=$(date +%s)
         ts=$(date '+%F %T')
-        printf '{"server":"%s","url":"%s","user":"%s","renewed_at":"%s"}\n' \
-            "$SERVER_NAME" "$CUR_URL" "$(whoami)" "$ts" > "$STATE"
+        # Write JSON safely. printf %s does NOT escape " or \, so use python3
+        # when available to produce a valid JSON document (defensive against
+        # unusual hostnames / usernames containing quotes or backslashes).
+        if command -v python3 >/dev/null 2>&1; then
+            SERVER_NAME="$SERVER_NAME" CUR_URL="$CUR_URL" WHOAMI="$(whoami)" TS="$ts" \
+                python3 -c '
+import json, os
+print(json.dumps({
+    "server": os.environ["SERVER_NAME"],
+    "url": os.environ["CUR_URL"],
+    "user": os.environ["WHOAMI"],
+    "renewed_at": os.environ["TS"],
+}))' > "$STATE"
+        else
+            printf '{"server":"%s","url":"%s","user":"%s","renewed_at":"%s"}\n' \
+                "$SERVER_NAME" "$CUR_URL" "$(whoami)" "$ts" > "$STATE"
+        fi
         publish "RENEW $SERVER_NAME $CUR_URL"
         log "new tunnel: $CUR_URL"
         return 0
